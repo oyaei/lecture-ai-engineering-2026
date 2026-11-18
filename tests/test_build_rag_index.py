@@ -35,11 +35,32 @@ def test_built_index_can_be_searched(materials, monkeypatch):
     assert result["pages"] == 2  # 第5回の資料は検索対象に含めない
     assert all("章" in text and "ページ" in text for text in texts)
     monkeypatch.setattr(retrieval, "RAG_DB", database)
+    monkeypatch.setattr(retrieval, "RAG_SOURCE", source)
     monkeypatch.setattr(retrieval, "embed_text", lambda *_: [1, 0])
     hits = retrieval.search("質問")
     assert [h["page_id"] for h in hits] == ["lec01-main-p001", "lec02-main-p001"]
     assert hits[0]["content"] == "本文1"
     assert hits[0]["distance"] == pytest.approx(0)
+
+
+def test_search_adds_adjacent_pages_without_crossing_documents(monkeypatch):
+    pages = [
+        {"page_id": "lec01-main-p001", "document_id": "lec01-main", "content": "前"},
+        {"page_id": "lec01-main-p002", "document_id": "lec01-main", "content": "該当"},
+        {"page_id": "lec01-main-p003", "document_id": "lec01-main", "content": "後"},
+        {"page_id": "lec02-main-p001", "document_id": "lec02-main", "content": "別資料"},
+    ]
+    hits = [{**pages[1], "distance": 0.1}, {**pages[2], "distance": 0.2}]
+    monkeypatch.setattr(retrieval, "_vector_search", lambda _: hits)
+    monkeypatch.setattr(retrieval, "load_pages", lambda _: pages)
+
+    results = retrieval.search("質問")
+
+    assert [page["page_id"] for page in results] == [
+        "lec01-main-p002", "lec01-main-p001", "lec01-main-p003",
+    ]
+    assert [page["content"] for page in results] == ["該当", "前", "後"]
+    assert len({page["page_id"] for page in results}) == len(results)
 
 
 def test_existing_index_survives_failed_rebuild(materials):
