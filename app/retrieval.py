@@ -124,7 +124,7 @@ def open_index(path: Path):
         db.close()
 
 
-def search(query: str) -> list[dict]:
+def _vector_search(query: str) -> list[dict]:
     """質問を埋め込み、近いページを最大RAG_TOP_K件返す。"""
     if not isinstance(query, str) or not query.strip():
         raise ValueError("検索語が空です。")
@@ -136,6 +136,36 @@ def search(query: str) -> list[dict]:
             FROM chunks ORDER BY distance, page_id LIMIT ?
         """, (sqlite_vec.serialize_float32(vector), RAG_TOP_K))
         return [dict(row) for row in rows]
+
+
+def search(query: str) -> list[dict]:
+    """質問に近いページと、同じ資料内の前後1ページを返す。"""
+    hits = _vector_search(query)
+    pages = load_pages(RAG_SOURCE)
+    positions = {page["page_id"]: index for index, page in enumerate(pages)}
+    results, included = [], set()
+
+    for hit in hits:
+        position = positions.get(hit["page_id"])
+        if position is None:
+            if hit["page_id"] not in included:
+                results.append(hit)
+                included.add(hit["page_id"])
+            continue
+
+        document_id = hit["document_id"]
+        for neighbor_position in (position, position - 1, position + 1):
+            if not 0 <= neighbor_position < len(pages):
+                continue
+            neighbor = pages[neighbor_position]
+            if neighbor["document_id"] != document_id or neighbor["page_id"] in included:
+                continue
+            results.append({**neighbor, **(
+                {key: value for key, value in hit.items() if key not in neighbor}
+                if neighbor["page_id"] == hit["page_id"] else {}
+            )})
+            included.add(neighbor["page_id"])
+    return results
 
 
 def search_graph(query: str) -> dict:
@@ -151,7 +181,9 @@ def search_graph(query: str) -> dict:
             adjacent[a].add(b)
             adjacent[b].add(a)
 
-    seeds = [hit for hit in search(query) if hit["page_id"] in pages][:min(GRAPH_START_K, GRAPH_MAX_RESULTS)]
+    seeds = [hit for hit in _vector_search(query) if hit["page_id"] in pages][
+        :min(GRAPH_START_K, GRAPH_MAX_RESULTS)
+    ]
     seed_ids = {seed["page_id"] for seed in seeds}
     results, candidates = [], {}
     for rank, seed in enumerate(seeds):
